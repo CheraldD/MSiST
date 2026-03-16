@@ -2,7 +2,7 @@
 #include <vector>
 #include <numeric>
 #include <random>
-#include <iomanip>
+#include <iomanip> // Нужен для красивой таблички
 
 using namespace std;
 
@@ -10,91 +10,89 @@ using namespace std;
 // Настройки модели
 // ==========================================
 struct Config {
-    int N = 1;      // Количество приборов (маршрутов)
+    int N = 2;      // Количество приборов
     int L = 6;      // Максимальная длина очереди
-    int Q = 2;      // Количество источников (приоритетов)
+    int Q = 3;      // Количество приоритетов
 
-    double t_mod = 25;     // Время моделирования
-    double dt = 0.1;          // Шаг моделирования
+    double t_mod = 40;      // Время моделирования
+    double dt = 0.05;          // Шаг моделирования
 
-    double mu = 1.8;          // Время обработки заявки (const)
 
-    // Начальные Z для каждого приоритета (размер должен совпадать с Q)
-    vector<double> initial_Z = {0.15, 0.625};
+    // Прибор 0 -> 2.5 сек, Прибор 1 -> 2.7 сек
+    vector<double> server_mus = {3.5, 5};
+
+    // Начальные моменты для заявок
+    vector<double> initial_Z = {0.5, 1.0, 1.5};
 };
 
 class SMO {
 private:
     Config cfg;
-    double t; // Текущее время (t_real)
+    double t;
 
     // Переменные состояния
-    vector<double> Z; // Моменты поступления заявок (размер Q)
-    vector<double> U; // Время освобождения приборов (размер N)
+    vector<double> Z; // Моменты поступления
+    vector<double> U; // Время освобождения приборов
 
     // Статистика
-    vector<int> B;    // Всего заявок (поступивших)
-    vector<int> P;    // Количество отказов
-    vector<int> j;    // Заявок в очереди по приоритетам
+    vector<int> B;    // Поступило
+    vector<int> P;    // Отказано
+    vector<int> j;    // Очередь (текущая)
 
-    // Генератор случайных чисел
+    // Генератор
     double gen_random_interval() {
         static random_device rd;
         static mt19937 gen(rd());
-        static uniform_real_distribution<float> dist(1.2, 1.5);
+
+        static uniform_real_distribution<float> dist(1.5,3);
         return dist(gen);
     }
 
 public:
     SMO(Config config) : cfg(config) {
         t = 0.0;
-
-        // Инициализация векторов под размер задачи
         Z = cfg.initial_Z;
-        U.resize(cfg.N, 0.0); // N приборов, время 0
+        U.resize(cfg.N, 0.0);
         B.resize(cfg.Q, 0);
         P.resize(cfg.Q, 0);
         j.resize(cfg.Q, 0);
     }
 
-    // Логика постановки в очередь (check_task)
     void check_task(int k_index) {
         int current_queue_size = accumulate(j.begin(), j.end(), 0);
 
-        // Если есть место в очереди
         if (current_queue_size < cfg.L) {
             j[k_index]++;
         }
-        // Если очередь полна, пытаемся вытеснить менее важную заявку
         else {
             bool displaced = false;
-            // Ищем заявку с более низким приоритетом (индекс больше), чем k_index
-            // Идем с конца (самый низкий приоритет)
+
             for (int low_prio = cfg.Q - 1; low_prio > k_index; --low_prio) {
                 if (j[low_prio] > 0) {
-                    j[low_prio]--;      // Выкидываем низкоприоритетную
-                    P[low_prio]++;      // Записываем ей отказ
-                    j[k_index]++;       // Ставим новую
+                    j[low_prio]--;
+                    P[low_prio]++;
+                    j[k_index]++;
                     displaced = true;
                     break;
                 }
             }
-
             if (!displaced) {
-                // Если вытеснить некого (все важнее или такие же), отказываем текущей
                 P[k_index]++;
             }
         }
     }
 
-    // Логика извлечения из очереди (trow_task) и загрузки прибора
-    // Возвращает true, если прибор взял задачу
     bool try_process_queue(int server_idx) {
-        // Проверяем очередь, начиная с высшего приоритета (0)
+        // Пробегаем по приоритетам: от 0 (высший) до конца
         for (int k = 0; k < cfg.Q; ++k) {
             if (j[k] > 0) {
-                j[k]--; // Убираем из очереди
-                U[server_idx] = t + cfg.mu; // Занимаем прибор
+                j[k]--; // Извлекаем из очереди
+
+
+                // Берем mu из вектора согласно индексу прибора (server_idx)
+                double current_mu = cfg.server_mus[server_idx];
+
+                U[server_idx] = t + current_mu; // Занимаем прибор
                 return true;
             }
         }
@@ -105,51 +103,74 @@ public:
         while (t <= cfg.t_mod) {
             t += cfg.dt;
 
-            // 1. Проверка поступления новых заявок (цикл по всем источникам)
+            // 1. Генерация
             for (int k = 0; k < cfg.Q; ++k) {
                 if (t >= Z[k]) {
-                    B[k]++;             // Увеличиваем счетчик поступивших
-                    check_task(k);      // Пробуем поставить в очередь
-                    Z[k] += gen_random_interval(); // Планируем следующую
+                    B[k]++;
+                    check_task(k);
+                    Z[k] += gen_random_interval();
                 }
             }
 
-            // 2. Проверка освобождения приборов (цикл по всем приборам)
+            // 2. Обработка
             for (int i = 0; i < cfg.N; ++i) {
-                // Если прибор свободен (время освобождения <= текущему)
-                // ИЛИ только что освободился
                 if (t >= U[i]) {
-                    // Пытаемся взять задачу из очереди
                     try_process_queue(i);
                 }
             }
         }
     }
 
+
     void print_stats() {
-        cout << fixed << setprecision(4);
-        cout << "=== Результаты моделирования ===" << endl;
-        cout << "Приборов (N): " << cfg.N << ", Очередь (L): " << cfg.L << endl;
+
+        string line = "+-----------+--------------+--------------+--------------+--------------+";
+
+        cout << endl << "РЕЗУЛЬТАТЫ МОДЕЛИРОВАНИЯ СМО" << endl;
+        cout << "Время: " << cfg.t_mod << " | Приборов: " << cfg.N << " | Очередь макс: " << cfg.L << endl;
+        cout << "Параметры обработки (mu): ";
+        for(size_t i=0; i<cfg.server_mus.size(); ++i)
+            cout << "Пр." << i+1 << "=" << cfg.server_mus[i] << " ";
+        cout << endl << endl;
+
+        cout << line << endl;
+        cout << "| Приоритет |   Поступило  |    Отказов   |  Вер. отказа |  Вер. обслуж |" << endl;
+        cout << line << endl;
+
+        int total_B = 0;
+        int total_P = 0;
 
         for (int k = 0; k < cfg.Q; ++k) {
-            double p_refusal = (B[k] > 0) ? (double)P[k] / B[k] : 0.0;
+            total_B += B[k];
+            total_P += P[k];
 
-            cout << "----------------------------" << endl;
-            cout << "Приоритет " << (k + 1) << ":" << endl;
-            cout << "  Поступило (B[" << k+1 << "]): " << B[k] << endl;
-            cout << "  Отказов   (P[" << k+1 << "]): " << P[k] << endl;
-            cout << "  Вероятность отказа:  " << p_refusal << endl;
-            cout << "  Вероятность обслуж.: " << (1.0 - p_refusal) << endl;
+            double p_ref = (B[k] > 0) ? (double)P[k] / B[k] : 0.0;
+            double p_srv = 1.0 - p_ref;
+
+            cout << "|     " << left << setw(6) << (k + 1)
+            << "| " << right << setw(12) << B[k]
+            << " | " << right << setw(12) << P[k]
+            << " | " << right << setw(12) << fixed << setprecision(4) << p_ref
+            << " | " << right << setw(12) << p_srv << " |" << endl;
         }
-        cout << "----------------------------" << endl;
+
+        cout << line << endl;
+
+        // Итоговая строка
+        double total_p_ref = (total_B > 0) ? (double)total_P / total_B : 0.0;
+        cout << "|   ИТОГО   | " << right << setw(12) << total_B
+        << " | " << right << setw(12) << total_P
+        << " | " << right << setw(12) << fixed << setprecision(4) << total_p_ref
+        << " | " << right << setw(12) << (1.0 - total_p_ref) << " |" << endl;
+        cout << line << endl << endl;
     }
 };
 
 int main() {
     setlocale(LC_ALL, "Russian");
-
-    // Настройка параметров перед запуском
     Config myConf;
+
+
 
     SMO model(myConf);
     model.run();
